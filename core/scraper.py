@@ -24,19 +24,55 @@ def _yt_dlp_cmd():
     return "yt-dlp"  # fallback: assume no PATH
 
 
+def _cookies_arg() -> list:
+    """Retorna [--cookies, path] se encontrar arquivo de cookies na pasta do projeto."""
+    script_dir = Path(__file__).parent.parent
+    for name in ["www.youtube.com_cookies.txt", "cookies.txt", "youtube_cookies.txt"]:
+        path = script_dir / name
+        if path.exists():
+            return ["--cookies", str(path)]
+    return []
+
+
+def _js_runtime_args() -> list:
+    """Retorna flags de JS runtime se Node.js estiver disponível."""
+    try:
+        r = subprocess.run(["node", "--version"], capture_output=True, timeout=5)
+        if r.returncode == 0:
+            return ["--js-runtimes", "node", "--remote-components", "ejs:github"]
+    except Exception:
+        pass
+    return []
+
+
 class TranscriptScraper:
     def __init__(self, output_dir: str, log_callback=None):
         self.output_dir = output_dir
         self.log_callback = log_callback or print
         self.yt = _yt_dlp_cmd()
+        self.cookies = _cookies_arg()
+        self.js_args = _js_runtime_args()
 
     def log(self, message: str):
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log_callback(f"[{timestamp}] {message}")
 
+    @staticmethod
+    def format_duration(seconds) -> str:
+        """Converte segundos em HH:MM:SS ou MM:SS."""
+        try:
+            s = int(seconds)
+            h, rem = divmod(s, 3600)
+            m, sec = divmod(rem, 60)
+            if h:
+                return f"{h}:{m:02d}:{sec:02d}"
+            return f"{m}:{sec:02d}"
+        except Exception:
+            return ""
+
     def _fetch_flat(self, url: str, timeout: int = 120) -> list:
         """Roda yt-dlp --flat-playlist -J e retorna entries."""
-        cmd = [self.yt, "--flat-playlist", "-J", "--no-warnings", url]
+        cmd = [self.yt, "--flat-playlist", "-J", "--no-warnings"] + self.js_args + self.cookies + [url]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         if result.returncode != 0:
             self.log(f"Erro yt-dlp: {result.stderr[:300]}")
@@ -66,6 +102,7 @@ class TranscriptScraper:
                     "id": entry["id"],
                     "date": entry.get("upload_date"),
                     "kind": kind,
+                    "duration": self.format_duration(entry.get("duration", 0)),
                 })
 
             self.log(f"Encontrados {len(videos)} vídeos/lives")
@@ -79,6 +116,66 @@ class TranscriptScraper:
             return []
         except Exception as e:
             self.log(f"Erro inesperado: {e}")
+            return []
+
+    def search_youtube(self, query: str, max_results: int = 20) -> list:
+        """Busca vídeos no YouTube por termo de pesquisa."""
+        try:
+            search_url = f"ytsearch{max_results}:{query}"
+            self.log(f"Buscando no YouTube: {query}")
+            entries = self._fetch_flat(search_url, timeout=60)
+
+            videos = []
+            for entry in entries:
+                if not entry or not entry.get("id"):
+                    continue
+                channel = entry.get("channel") or entry.get("uploader", "")
+                title = entry.get("title", "Sem título")
+                display_title = f"{title}  [{channel}]" if channel else title
+                videos.append({
+                    "url": f"https://www.youtube.com/watch?v={entry['id']}",
+                    "title": display_title,
+                    "id": entry["id"],
+                    "date": entry.get("upload_date"),
+                    "kind": "video",
+                    "duration": self.format_duration(entry.get("duration", 0)),
+                })
+
+            self.log(f"Encontrados {len(videos)} resultados")
+            return videos
+
+        except subprocess.TimeoutExpired:
+            self.log("Timeout na busca. Verifique sua conexão.")
+            return []
+        except Exception as e:
+            self.log(f"Erro ao buscar: {e}")
+            return []
+
+    def get_video_info(self, video_url: str) -> list:
+        """Retorna info de um único vídeo como lista de 1 item."""
+        try:
+            self.log(f"Carregando vídeo: {video_url}")
+            cmd = [self.yt, "-J", "--no-warnings", "--no-playlist"] + self.js_args + self.cookies + [video_url]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode != 0:
+                self.log(f"Erro yt-dlp: {result.stderr[:200]}")
+                return []
+            data = json.loads(result.stdout)
+            live_status = data.get("live_status", "")
+            kind = "live" if live_status in ("is_live", "was_live", "is_upcoming") else "video"
+            return [{
+                "url": video_url,
+                "title": data.get("title", "Sem título"),
+                "id": data.get("id", ""),
+                "date": data.get("upload_date"),
+                "kind": kind,
+                "duration": self.format_duration(data.get("duration", 0)),
+            }]
+        except subprocess.TimeoutExpired:
+            self.log("Timeout ao carregar vídeo.")
+            return []
+        except Exception as e:
+            self.log(f"Erro ao carregar vídeo: {e}")
             return []
 
     def get_channel_playlists(self, channel_url: str) -> list:
@@ -140,6 +237,7 @@ class TranscriptScraper:
                 "--sub-lang", lang,
                 "--convert-subs", "vtt",
                 "--no-warnings",
+            ] + self.js_args + self.cookies + [
                 "-o", out_template,
                 video_url,
             ]
@@ -230,15 +328,10 @@ class TranscriptScraper:
             self.log(f"Erro ao salvar: {e}")
             return False
 
-    def download_audio(self, video_url: str, video_title: str, upload_date: str | None = None) -> bool:
+    def download_audio(self, video_url: str, video_title: str, upload_date: str | None = None) -> bool:  # noqa: ARG002
         """Baixa melhor áudio disponível (mp3 se ffmpeg presente, webm/m4a caso contrário)."""
         try:
-            if upload_date and len(upload_date) == 8:
-                date_str = f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:8]}"
-            else:
-                date_str = datetime.now().strftime("%Y-%m-%d")
-
-            filename = f"{date_str} - {video_title}.%(ext)s"
+            filename = f"{video_title}.%(ext)s"
             filename = self._sanitize_filename(filename)
             out_template = os.path.join(self.output_dir, filename)
 
@@ -246,27 +339,43 @@ class TranscriptScraper:
 
             ffmpeg = self._ffmpeg_path()
             if ffmpeg:
+                # Passa o diretório do ffmpeg (não o binário) para o yt-dlp achar ffprobe também
+                ffmpeg_dir = os.path.dirname(ffmpeg)
                 cmd = [
                     self.yt,
                     "--extract-audio",
                     "--audio-format", "mp3",
                     "--audio-quality", "0",
-                    "--ffmpeg-location", ffmpeg,
+                    "--ffmpeg-location", ffmpeg_dir,
                     "--no-warnings",
+                    "--no-playlist",
+                ] + self.js_args + self.cookies + [
                     "-o", out_template,
                     video_url,
                 ]
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                # stdout → DEVNULL evita travamento por buffer cheio em downloads longos
+                result = subprocess.run(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    timeout=600,
+                )
                 if result.returncode == 0:
                     path = out_template.replace("%(ext)s", "mp3")
                     if os.path.exists(path):
                         self.log(f"Salvo: {os.path.basename(path)}")
                         return True
-                self.log(f"Erro ffmpeg: {result.stderr[:200]}")
+                err = result.stderr.decode("utf-8", errors="ignore")[:300]
+                self.log(f"Erro ffmpeg: {err}")
 
-            self.log("ffmpeg nao encontrado — baixando no formato nativo...")
-            cmd = [self.yt, "-f", "bestaudio", "--no-warnings", "-o", out_template, video_url]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            self.log("ffmpeg não encontrado — baixando no formato nativo...")
+            cmd = [self.yt, "-f", "bestaudio", "--no-warnings", "--no-playlist"] + self.js_args + self.cookies + ["-o", out_template, video_url]
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=600,
+            )
             if result.returncode == 0:
                 for ext in ["webm", "m4a", "opus", "ogg"]:
                     path = out_template.replace("%(ext)s", ext)
@@ -274,7 +383,8 @@ class TranscriptScraper:
                         self.log(f"Salvo: {os.path.basename(path)}")
                         return True
 
-            self.log(f"Erro ao baixar audio: {result.stderr[:300]}")
+            err = result.stderr.decode("utf-8", errors="ignore")[:300]
+            self.log(f"Erro ao baixar áudio: {err}")
             return False
 
         except subprocess.TimeoutExpired:
@@ -293,16 +403,15 @@ class TranscriptScraper:
                 return "ffmpeg"
         except Exception:
             pass
-        # Tenta static-ffmpeg (instalado via pip)
+        # Tenta static-ffmpeg via API interna (retorna path real do binário)
         try:
-            import static_ffmpeg
-            static_ffmpeg.add_paths()
-            import shutil
-            path = shutil.which("ffmpeg")
-            if path:
-                return path
-        except Exception:
-            pass
+            from static_ffmpeg import run as sf_run
+            ffmpeg, _ = sf_run.get_or_fetch_platform_executables_else_raise()
+            if ffmpeg and os.path.exists(ffmpeg):
+                self.log(f"ffmpeg encontrado: {ffmpeg}")
+                return ffmpeg
+        except Exception as e:
+            self.log(f"static-ffmpeg falhou: {e}")
         return None
 
     def _sanitize_filename(self, filename: str) -> str:

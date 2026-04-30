@@ -20,8 +20,8 @@ def main(page: ft.Page):
 
     # ===== COMPONENTES =====
     url_field = ft.TextField(
-        label="URL do Canal do YouTube",
-        hint_text="Ex: https://www.youtube.com/@poptheballoon",
+        label="URL do Canal / Vídeo  ou  Nome para Buscar",
+        hint_text="Ex: @poptheballoon  |  youtube.com/watch?v=...  |  nome de uma música",
         expand=True,
         height=55,
     )
@@ -82,6 +82,7 @@ def main(page: ft.Page):
                 value=selected.get(idx, False),
                 on_change=lambda e, ix=idx: on_cb_change(ix, e.control.value),
             )
+            duration = all_videos[idx].get("duration", "")
             row = ft.Container(
                 content=ft.Row([
                     cb,
@@ -91,6 +92,13 @@ def main(page: ft.Page):
                         expand=True,
                         no_wrap=True,
                         overflow=ft.TextOverflow.ELLIPSIS,
+                    ),
+                    ft.Text(
+                        duration,
+                        size=11,
+                        color=ft.colors.GREY_600,
+                        width=60,
+                        text_align=ft.TextAlign.RIGHT,
                     ),
                 ]),
                 padding=ft.padding.symmetric(horizontal=8, vertical=3),
@@ -139,7 +147,29 @@ def main(page: ft.Page):
             scraper = TranscriptScraper(output_dir["value"] or ".", append_log)
             kf = kind_filter["value"]
 
-            if kf == "playlist":
+            is_url = url.startswith("http") or "youtube.com" in url or "youtu.be" in url
+            has_playlist = "list=" in url
+            is_single_video = ("watch?v=" in url or "youtu.be/" in url or "/shorts/" in url) and not has_playlist
+
+            # Extrai URL limpa da playlist quando a URL mistura vídeo + lista
+            def playlist_url(raw):
+                import re
+                m = re.search(r"list=([\w-]+)", raw)
+                if m:
+                    return f"https://www.youtube.com/playlist?list={m.group(1)}"
+                return raw
+
+            if not is_url:
+                items = scraper.search_youtube(url, max_results=20)
+                label = "resultado"
+            elif has_playlist:
+                append_log("Buscando videos da playlist...")
+                items = scraper.get_playlist_videos(playlist_url(url))
+                label = "vídeo"
+            elif is_single_video:
+                items = scraper.get_video_info(url)
+                label = "vídeo"
+            elif kf == "playlist":
                 items = scraper.get_channel_playlists(url)
                 label = "playlist"
             else:
@@ -148,7 +178,7 @@ def main(page: ft.Page):
                 label = "vídeo"
 
             if not items:
-                append_log(f"Nenhum {label} encontrado. Verifique a URL.")
+                append_log(f"Nenhum {label} encontrado. Verifique a entrada.")
                 btn_fetch.disabled = False
                 page.update()
                 return
@@ -375,56 +405,62 @@ def main(page: ft.Page):
 
     # ===== LAYOUT =====
     page.add(
-        ft.Text("Pop the Balloon — Transcript Archiver", size=20, weight=ft.FontWeight.BOLD, color=ft.colors.BLUE_800),
-        ft.Divider(height=8),
+        ft.Column(
+            controls=[
+                ft.Text("Pop the Balloon — Transcript Archiver", size=20, weight=ft.FontWeight.BOLD, color=ft.colors.BLUE_800),
+                ft.Divider(height=8),
 
-        ft.Row([url_field, btn_fetch]),
-        ft.Row([folder_text, ft.Container(expand=True), btn_folder]),
+                ft.Row([url_field, btn_fetch]),
+                ft.Row([folder_text, ft.Container(expand=True), btn_folder]),
 
-        ft.Divider(height=8),
+                ft.Divider(height=8),
 
-        ft.Row([search_field, btn_select_all, count_text]),
-        ft.Row([
-            ft.Text("Filtrar:", size=12, color=ft.colors.GREY_700),
-            kind_btns["all"],
-            kind_btns["video"],
-            kind_btns["live"],
-            kind_btns["playlist"],
-        ]),
+                ft.Row([search_field, btn_select_all, count_text]),
+                ft.Row([
+                    ft.Text("Filtrar:", size=12, color=ft.colors.GREY_700),
+                    kind_btns["all"],
+                    kind_btns["video"],
+                    kind_btns["live"],
+                    kind_btns["playlist"],
+                ]),
 
-        ft.Container(
-            content=video_list_view,
-            height=280,
-            border=ft.border.all(1, ft.colors.GREY_300),
-            border_radius=6,
-            padding=4,
-        ),
+                ft.Container(
+                    content=video_list_view,
+                    height=280,
+                    border=ft.border.all(1, ft.colors.GREY_300),
+                    border_radius=6,
+                    padding=4,
+                ),
 
-        ft.Container(height=6),
+                ft.Container(height=6),
 
-        ft.Row([
-            ft.Text("Modo:", size=12, color=ft.colors.GREY_700),
-            mode_btns["transcript"],
-            mode_btns["audio"],
-        ]),
+                ft.Row([
+                    ft.Text("Modo:", size=12, color=ft.colors.GREY_700),
+                    mode_btns["transcript"],
+                    mode_btns["audio"],
+                ]),
 
-        ft.Container(height=4),
-        ft.Row([btn_extract, btn_stop]),
-        ft.Container(height=4),
+                ft.Container(height=4),
+                ft.Row([btn_extract, btn_stop]),
+                ft.Container(height=4),
 
-        progress_bar,
-        progress_text,
+                progress_bar,
+                progress_text,
 
-        ft.Container(height=4),
-        ft.Text("Log", weight=ft.FontWeight.BOLD, size=12),
-        ft.Container(
-            content=log_area,
-            height=130,
-            border=ft.border.all(1, ft.colors.GREY_300),
-            border_radius=6,
-            padding=8,
-            bgcolor=ft.colors.GREY_100,
-        ),
+                ft.Container(height=4),
+                ft.Text("Log", weight=ft.FontWeight.BOLD, size=12),
+                ft.Container(
+                    content=log_area,
+                    height=130,
+                    border=ft.border.all(1, ft.colors.GREY_300),
+                    border_radius=6,
+                    padding=8,
+                    bgcolor=ft.colors.GREY_100,
+                ),
+            ],
+            scroll=ft.ScrollMode.AUTO,
+            expand=True,
+        )
     )
 
 

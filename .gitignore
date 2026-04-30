@@ -8,6 +8,11 @@ env/
 .env
 .env.local
 .env.*.local
+*cookies*.txt
+*_cookies*
+
+# Claude Code
+.claude/
 
 # Python
 __pycache__/
