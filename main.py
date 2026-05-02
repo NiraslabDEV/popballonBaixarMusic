@@ -148,15 +148,23 @@ def main(page: ft.Page):
             kf = kind_filter["value"]
 
             is_url = url.startswith("http") or "youtube.com" in url or "youtu.be" in url
-            has_playlist = "list=" in url
-            is_single_video = ("watch?v=" in url or "youtu.be/" in url or "/shorts/" in url) and not has_playlist
+            import re as _re
+            list_match = _re.search(r"list=([\w-]+)", url)
+            list_id = list_match.group(1) if list_match else ""
+            is_radio = list_id.startswith("RD") or list_id.startswith("RDMM")
+            has_playlist = bool(list_id) and not is_radio
+            is_single_video = ("watch?v=" in url or "youtu.be/" in url or "/shorts/" in url) and (not has_playlist)
 
             # Extrai URL limpa da playlist quando a URL mistura vídeo + lista
             def playlist_url(raw):
                 import re
                 m = re.search(r"list=([\w-]+)", raw)
                 if m:
-                    return f"https://www.youtube.com/playlist?list={m.group(1)}"
+                    list_id = m.group(1)
+                    # Playlists de Rádio/Mix (RD...) só funcionam com a URL original
+                    if list_id.startswith("RD") or list_id.startswith("RDMM"):
+                        return raw
+                    return f"https://www.youtube.com/playlist?list={list_id}"
                 return raw
 
             if not is_url:
